@@ -8,11 +8,17 @@ import androidx.activity.viewModels
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import tw.notivault.core.NotificationRecord
 import tw.notivault.data.*
 import tw.notivault.ui.VaultApp
+import tw.notivault.backup.DavRequestTiming
+
+data class ConnectionTestState(val running: Boolean = false, val stage: String = "", val result: String? = null,
+    val failed: Boolean = false, val elapsedMillis: Long = 0, val requests: List<DavRequestTiming> = emptyList())
 
 class MainActivity : ComponentActivity() {
     private val model: VaultViewModel by viewModels()
@@ -31,6 +37,8 @@ class VaultViewModel(application: android.app.Application) : AndroidViewModel(ap
     val storage = MutableStateFlow(0L)
     val detail = MutableStateFlow<NotificationRecord?>(null)
     val requestRemoteHistory = MutableStateFlow(false)
+    val connectionTest = MutableStateFlow(ConnectionTestState())
+    private var connectionTestJob: Job? = null
     val remote = RemoteHistoryStore(application)
     init { viewModelScope.launch(Dispatchers.IO) { counts.collect { storage.value = graph.repository.storageBytes() } } }
     fun notify(text: String) { message.value = text }
@@ -47,11 +55,29 @@ class VaultViewModel(application: android.app.Application) : AndroidViewModel(ap
             notify("WebDAV 設定已儲存")
         }.onFailure { notify("無法儲存：${it.message}") }
     } }
-    fun testServer(draft: AppSettings) { viewModelScope.launch {
-        try { notify(graph.backup.testConnection(draft)) }
-        catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-        catch (failure: Exception) { notify("連線測試失敗：${failure.message}") }
-    } }
+    fun testServer(draft: AppSettings) {
+        if (connectionTestJob?.isActive == true) return
+        connectionTest.value = ConnectionTestState(running = true, stage = "準備測試")
+        connectionTestJob = viewModelScope.launch {
+            val started = System.nanoTime()
+            try {
+                val result = graph.backup.testConnection(draft,
+                    progress = { stage -> connectionTest.update { it.copy(stage = stage) } },
+                    timing = { timing -> connectionTest.update { it.copy(requests = (it.requests + timing).takeLast(30)) } })
+                connectionTest.update { it.copy(result = result) }
+                notify("WebDAV 連線測試成功")
+            } catch (cancelled: CancellationException) {
+                connectionTest.update { it.copy(result = "測試已取消") }
+                throw cancelled
+            } catch (failure: Exception) {
+                connectionTest.update { it.copy(failed = true, result = "連線測試失敗：${failure.message}") }
+                notify("連線測試失敗：${failure.message}")
+            } finally {
+                connectionTest.update { it.copy(running = false, elapsedMillis = (System.nanoTime() - started) / 1_000_000) }
+            }
+        }
+    }
+    fun cancelServerTest() { connectionTestJob?.cancel() }
     fun backupNow() { viewModelScope.launch {
         if (!settings.value.configured) { notify("請先儲存 WebDAV 連線設定"); return@launch }
         graph.settings.update { it.copy(backupStatus = "已排程備份，等待符合設定的網路") }

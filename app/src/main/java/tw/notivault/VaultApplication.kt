@@ -29,7 +29,7 @@ class AppGraph(context: Context) {
             }
         }).build()
     val repository = ArchiveRepository(context, database, settings, scope)
-    val backup = BackupCoordinator(context, settings, repository)
+    val backup = BackupCoordinator(context, settings, repository, scope)
     val listenerConnected = MutableStateFlow(false)
     val captureQueue = Channel<CaptureEvent>(Channel.UNLIMITED)
     init {

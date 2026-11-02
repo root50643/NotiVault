@@ -5,6 +5,8 @@ import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import androidx.work.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -29,7 +31,7 @@ object NetworkGate {
     }
 }
 
-class BackupCoordinator(private val context: Context, private val settings: SettingsStore, private val repository: ArchiveRepository) {
+class BackupCoordinator(private val context: Context, private val settings: SettingsStore, private val repository: ArchiveRepository, private val scope: CoroutineScope) {
     val busy = MutableStateFlow(false)
     private val mutex = Mutex()
     private val cache = File(context.cacheDir, "backup").apply { mkdirs() }
@@ -59,31 +61,20 @@ class BackupCoordinator(private val context: Context, private val settings: Sett
         }
     }
 
-    suspend fun testConnection(configuration: AppSettings): String = withContext(Dispatchers.IO) {
+    suspend fun testConnection(configuration: AppSettings, progress: (String) -> Unit = {}, timing: (DavRequestTiming) -> Unit = {}): String = withContext(Dispatchers.IO) {
         mutex.withLock {
             busy.value = true
-            val client = WebDavClient(configuration.webDavConfig())
-            val directory = listOf(configuration.installationId)
-            val source = File(cache, "probe-${UUID.randomUUID()}.txt")
-            val downloaded = File(cache, "probe-download-${UUID.randomUUID()}.txt")
-            val temporary = directory + ".probe-${UUID.randomUUID()}.upload"
-            val destination = directory + ".probe-${UUID.randomUUID()}.txt"
             try {
                 check(NetworkGate.allowed(context, configuration.allowMobile)) { "目前網路不符合備份設定" }
-                client.ensureCollections(directory)
-                client.list(emptyList())
-                source.writeText("NotiVault connection verification ${UUID.randomUUID()}")
-                client.put(temporary, source); client.publish(temporary, destination, null)
-                val first = checkNotNull(client.download(destination, downloaded))
-                check(sha256(source) == sha256(downloaded)) { "下載內容校驗失敗" }
-                source.appendText("\nconditional overwrite")
-                client.put(temporary, source); client.publish(temporary, destination, first)
-                check(client.download(destination, downloaded) != null && sha256(source) == sha256(downloaded)) { "更新內容校驗失敗" }
-                "連線成功：目錄、上傳、條件式 MOVE、下載及 SHA-256 皆正常"
-            } finally {
-                runCatching { client.deleteTemporary(temporary) }; runCatching { client.deleteTemporary(destination) }
-                source.delete(); downloaded.delete(); busy.value = false
-            }
+                withInteractiveDav(configuration.webDavConfig(), timing) { client ->
+                    ConnectionProbe(cache).run(client, configuration.installationId, progress) { paths ->
+                        scope.launch(Dispatchers.IO) {
+                            val cleaner = WebDavClient.cleanup(configuration.webDavConfig())
+                            paths.forEach { path -> runCatching { cleaner.deleteTemporary(path) } }
+                        }
+                    }
+                }
+            } finally { busy.value = false }
         }
     }
 

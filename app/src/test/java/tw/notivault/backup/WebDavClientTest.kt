@@ -6,6 +6,27 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class WebDavClientTest {
+    @Test fun directoryBrowserUsesEndpointRootAndEncodesSelectedFolderNames() {
+        val server = MockWebServer(); server.start()
+        try {
+            val folder = "/dav/%E5%82%99%E4%BB%BD%20%2B%20%E4%B8%AD%E6%96%87/"
+            val children = """<d:response><d:href>$folder</d:href><d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response><d:response><d:href>/dav/file.csv</d:href><d:propstat><d:prop><d:resourcetype/></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>"""
+            server.enqueue(MockResponse().setResponseCode(207).setBody(collectionXml("/dav/", children)))
+            server.enqueue(MockResponse().setResponseCode(207).setBody(collectionXml(folder)))
+            val client = WebDavClient(WebDavConfig(server.url("/dav/").toString(), "old/backup", "u", "p", true))
+            assertEquals(listOf(DavEntry("備份 + 中文", true, 0)), client.browse(emptyList()))
+            assertTrue(client.browse(listOf("備份 + 中文")).isEmpty())
+            assertEquals("/dav/", server.takeRequest().requestUrl!!.encodedPath)
+            assertEquals(listOf("dav", "備份 + 中文", ""), server.takeRequest().requestUrl!!.pathSegments)
+        } finally { server.shutdown() }
+    }
+    @Test fun missingBrowserDirectoryIsAnErrorInsteadOfAnEmptySelectableFolder() {
+        val server = MockWebServer(); server.start()
+        try {
+            server.enqueue(MockResponse().setResponseCode(404))
+            assertEquals(404, assertThrows(DavException::class.java) { WebDavClient(WebDavConfig(server.url("/").toString(), "old", "", "", true)).browse(emptyList()) }.status)
+        } finally { server.shutdown() }
+    }
     @Test fun httpMustBeExplicitlyEnabled() {
         assertThrows(IllegalArgumentException::class.java) { WebDavClient(WebDavConfig("http://localhost/", "vault", "u", "p")) }
     }
